@@ -33,7 +33,8 @@ dat.complete<-list(N=length(DF.stan.lv1[,1]),
                    y=DF.stan.lv1$ANX_r
 )
 
-pars.monitor<-c('Sigma_beta',
+pars.monitor<-c('alpha',
+                'Sigma_beta',
                 'sigma',
                 'gamma',
                 'beta',
