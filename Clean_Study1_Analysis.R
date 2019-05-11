@@ -787,6 +787,116 @@ beta_00<-fixef(Neg_ucm)[1,1]
 post_iter<-2000   #No. of chains per data set x No. post-warmup iterations per chain
                   #for loops below require this value is correctly specified
 
+#Simple Variance Estimate From Level 1 Equation Only 
+#=-=-=-=-=-=-=-=-=-=-=-=-=-=
+within_cov<-c(22)                    #Columns with group-mean centered predictors
+random_cov<-c(22)                    #Level 1 predictors with random slopes
+
+#Getting distributions of fixed effects
+Intercept = posterior_samples(Neg_Worst, pars = 'b_Intercept') 
+Worst = posterior_samples(Neg_Worst, pars = 'b_c.Worst') 
+
+#Getting between-subjects variance terms for random effects
+Int_var = posterior_samples(Neg_Worst, pars = 'sd_ID__Intercept')^2
+Worst_var = posterior_samples(Neg_Worst, pars = 'sd_ID__c.Worst')^2 
+
+#Getting covariances of random effects (i.e., tau matrix)
+cov_Int_Worst = posterior_samples(Neg_Worst, pars = 'sd_ID__Intercept')*
+  posterior_samples(Neg_Worst, pars = 'sd_ID__c.Worst')*
+  posterior_samples(Neg_Worst, pars = 'cor_ID__Intercept__c.Worst')
+
+#Getting level 1 error variance
+sigma<-log(1+posterior_samples(Neg_Worst, pars = 'sigma')/beta_00)
+
+post_samples<-data.frame(Intercept,
+                         Worst, 
+                         Int_var, 
+                         Worst_var, 
+                         cov_Int_Worst, 
+                         sigma)
+
+colnames(post_samples)<-c('Intercept', 
+                          'Worst', 
+                          'Int_var', 
+                          'Worst_var', 
+                          'cov_Int_Worst', 
+                          'sigma')
+
+#Aggregate across imputed datasets
+#Currently going to take 1000 draws from posterior distributions
+#Will then apply across all 20 data sets
+
+Neg_Worst_var<-list(between_var=vector(), 
+                         within_var=vector(), 
+                         between_All_tot=vector(),
+                         between_All_btw=vector(),
+                         between_res_btw=vector(),
+                         within_fix_wthn=vector(),
+                         within_fix_tot=vector(),
+                         within_slope_var_wthn=vector(),
+                         within_res_wthn=vector(), 
+                         within_unmod_tot=vector())
+
+for(i in 1:length(dat.study1.list)){
+  print(paste('Starting w/ imputed set', i, 'out of', M))
+  samp_frame<-1:post_iter+(i-1)*post_iter
+  D<-sample(samp_frame, size = 400, replace = FALSE)
+  for(d in 1:length(D)){
+    #browser()
+    Gamma_w<-as.vector(
+      as.matrix(
+        post_samples[D[d], c('Worst')]))       #Make sure the effects line up - in order of within_cov
+    Gamma_b<-as.vector(
+      as.matrix(
+        post_samples[D[d], c('Intercept')]))    #level fixed intercept and any level 2 fixed effects
+    tau<-c(post_samples[D[d], c('Int_var', 'cov_Int_Worst')], 
+           post_samples[D[d], c('cov_Int_Worst', 'Worst_var')])
+    
+    tau<-matrix(unlist(tau), 
+                byrow=TRUE, 
+                ncol=2)
+    
+    #Matrix rows/columns ordered starting with tau.00 (intercept variance)
+    #then add columns/rows for random effects of slopes in order of within_cov
+    
+    Sigma2<-post_samples[D[d], 'sigma']
+    
+    r2mlm_DN<-r2MLM(data=dat.study1.list[[i]], 
+                    within_covs = within_cov,
+                    between_covs = NULL,
+                    random_covs = random_cov, 
+                    gamma_w = Gamma_w, 
+                    gamma_b = Gamma_b, 
+                    Tau = tau, 
+                    sigma2 = Sigma2, 
+                    has_intercept = TRUE, 
+                    clustermeancentered = TRUE)
+    
+    #Extracting relevant values across imputed datasets
+    Neg_Worst_var$between_var<-c(Neg_Worst_var$between_var, as.numeric(r2mlm_DN$Decompositions['fixed, between', 'total'])+
+                                        as.numeric(r2mlm_DN$Decompositions['mean variation', 'total']))
+    Neg_Worst_var$within_var<-c(Neg_Worst_var$within_var, as.numeric(r2mlm_DN$Decompositions['sigma2', 'total'])+
+                                       as.numeric(r2mlm_DN$Decompositions['slope variation', 'total'])+
+                                       as.numeric(r2mlm_DN$Decompositions['fixed, within', 'total']))
+    Neg_Worst_var$between_All_tot<-c(Neg_Worst_var$between_All_tot, as.numeric(r2mlm_DN$R2s['f2', 'total']))
+    Neg_Worst_var$between_All_btw<-c(Neg_Worst_var$between_All_btw, as.numeric(r2mlm_DN$R2s['f2', 'between']))
+    Neg_Worst_var$between_res_btw<-c(Neg_Worst_var$between_res_btw, as.numeric(r2mlm_DN$R2s['m', 'between']))
+    Neg_Worst_var$within_fix_wthn<-c(Neg_Worst_var$within_fix_wthn, as.numeric(r2mlm_DN$Decompositions['fixed, within', 'within']))
+    Neg_Worst_var$within_fix_tot<-c(Neg_Worst_var$within_fix_tot, as.numeric(r2mlm_DN$Decompositions['fixed, within', 'total']))
+    Neg_Worst_var$within_slope_var_wthn<-c(Neg_Worst_var$within_slope_var_wthn, as.numeric(r2mlm_DN$Decompositions['slope variation', 'within']))
+    Neg_Worst_var$within_res_wthn<-c(Neg_Worst_var$within_res_wthn, as.numeric(r2mlm_DN$Decompositions['sigma2', 'within']))
+    Neg_Worst_var$within_unmod_tot<-c(Neg_Worst_var$within_unmod_tot, as.numeric(r2mlm_DN$Decompositions['sigma2', 'total'])+
+                                             as.numeric(r2mlm_DN$Decompositions['slope variation', 'total']))
+    
+    print(paste("Sampling", d, "out of", length(D), '- Dataset:', i))
+  }
+  print(paste("*** Finshed imputed data set", i, 'out of', M, "***"))
+}
+hist(Neg_Worst_var$between_var)
+hist(Neg_Worst_var$within_var)
+
+gc()
+
 #MODEL 1 - LV2 Predictor = DN, LV1 = individually mean-centered negative event indicator
 #=-=-=-=-=-=-=-=-=-=-=-=-=-=
 within_cov<-c(22)                    #Columns with group-mean centered predictors
@@ -1264,7 +1374,7 @@ mean(Neg_Worst_cross_var$between_var)
 mean(Neg_Worst_cross_var$between_var)-mean(Neg_Worst_c.DN_var$between_var)
 
 #Between Variance Model Terms: 
-Neg_Worst_btw<-mean(Neg_Worst_cross_var$between_var)
+Neg_Worst_btw<-mean(Neg_Worst_var$between_var)
 Neg_Worst_btw_All<-mean(Neg_Worst_cross_var$between_All_tot)
 Neg_Worst_btw_umod<-Neg_Worst_btw-Neg_Worst_btw_All
 
@@ -1274,7 +1384,7 @@ Neg_Worst_btw_Exp_unique<-(mean(Neg_Worst_All_var$between_All_btw)-mean(Neg_Wors
 Neg_Worst_btw_Shared<-Neg_Worst_btw_All-(Neg_Worst_btw_DN_unique+Neg_Worst_btw_Exp_unique)
 
 #Within Variance Model Terms: 
-Neg_Worst_wthn<-mean(Neg_Worst_cross_var$within_var)
+Neg_Worst_wthn<-mean(Neg_Worst_var$within_var)
 Neg_Worst_wthn_Worst<-mean(Neg_Worst_All_var$within_fix_tot)
 Neg_Worst_wthn_Worst_DN<-(mean(Neg_Worst_All_var$within_res_wthn)-mean(Neg_Worst_cross_var$within_res_wthn))*Neg_Worst_wthn
 Neg_Worst_wthn_unmod<-Neg_Worst_wthn-Neg_Worst_wthn_Worst-Neg_Worst_wthn_Worst_DN
@@ -1287,23 +1397,23 @@ Total_DN<-Neg_Worst_btw_DN_unique+Neg_Worst_btw_Shared+Neg_Worst_wthn_Worst_DN
 #Main Variance Decompisition River Plot :: Negative Mood - Worst Event Models :: 
 ###########################################################################################################
 Neg_Worst_River_DF<-data.frame(N1 = c('DN',
-                                     'DN <--> NDE Exposure',
-                                     'NDE Exposure', 
-                                     'Unmodeled Between', 
-                                     'Momentary NDE', 
-                                     'DN x NDE Reactivity',
-                                     'Unmodeled Within', 
-                                     'Total Between', 
-                                     'Total Within'), 
-                              N2 = c('Total Between', 
-                                     'Total Between', 
-                                     'Total Between', 
-                                     'Total Between', 
-                                     'Total Within', 
-                                     'Total Within',
-                                     'Total Within', 
-                                     'Total Variance', 
-                                     'Total Variance'), 
+                                     'DN <--> NDE \n Exposure',
+                                     'NDE \n Exposure', 
+                                     'Unmodeled \n Between', 
+                                     'Momentary \n NDE', 
+                                     'DN x NDE \n Reactivity',
+                                     'Unmodeled \n Within', 
+                                     'Total \n Between', 
+                                     'Total \n Within'), 
+                              N2 = c('Total \n Between', 
+                                     'Total \n Between', 
+                                     'Total \n Between', 
+                                     'Total \n Between', 
+                                     'Total \n Within', 
+                                     'Total \n Within',
+                                     'Total \n Within', 
+                                     'Total \n Variance', 
+                                     'Total \n Variance'), 
                               Value = c(Neg_Worst_btw_DN_unique, 
                                         Neg_Worst_btw_Shared,
                                         Neg_Worst_btw_Exp_unique, 
@@ -1332,8 +1442,8 @@ nodes<-data.frame(ID = c(Neg_Worst_River_DF$N1,
                   x = c(1,1,1,1,1,1,1,2,2,3), 
                   y = c(0,2,4,6,8,10,12,3,9,6))
 
-palette = c(paste0(brewer.pal(9, "Blues"), 90)[c(2, 4, 6, 8)], 
-            paste0(brewer.pal(9, "Reds"), 90)[c(4,6,8)], 
+palette = c(paste0(brewer.pal(9, "Blues"), 90)[c(6, 6, 6, 6)], 
+            paste0(brewer.pal(9, "Reds"), 90)[c(6,6,6)], 
             paste0(brewer.pal(9, "Blues"), 90)[9], 
             paste0(brewer.pal(9, "Reds"), 90)[9], 
             paste0(brewer.pal(9, 'Purples'), 90)[9])
@@ -1359,8 +1469,8 @@ png(paste0(study1.graphics, '/S1_Neg_Worst_river_overall.png'),
     height = 14, 
     width = 8)
 riverplot(Neg_Worst_riv, 
-          nodewidth = 3, 
-          plot_area = 1)
+          nodewidth = 2, 
+          plot_area = .95)
 title(ylab = 'Study 1 - Riverplot of Total Variance Decomposition Estimated from Negative Mood Models: Negative Daily Events')
 dev.off()
 
@@ -1369,8 +1479,8 @@ dev.off()
 # :: Negative Mood - Worst Event Models :: 
 #----------------------------------------------------------------------------------------------------------
 Neg_Worst_DN_River_DF<-data.frame(N1 = c('DN',
-                                        'DN <--> NDE Exposure',
-                                        'DN x NDE Reactivity'
+                                        'DN <--> NDE \n Exposure',
+                                        'DN x NDE \n Reactivity'
 ), 
 N2 = rep(paste0("Combined DN Effect ",
                 round(Total_DN*100, digits = 2),
@@ -1395,8 +1505,8 @@ nodes<-data.frame(ID = c(Neg_Worst_DN_River_DF$N1,
                   x = c(1,1,1,2), 
                   y = c(0,1,2,1))
 
-palette = c(paste0(brewer.pal(9, "Blues"),90)[c(7,9)],
-            paste0(brewer.pal(9, "Reds"),90)[7], 
+palette = c(paste0(brewer.pal(9, "Blues"),90)[c(6,9)],
+            paste0(brewer.pal(9, "Reds"),90)[6], 
             paste0(brewer.pal(9, "Purples"),90)[9])
 
 styles = lapply(nodes$y, function(n) {
@@ -1420,30 +1530,31 @@ png(paste0(study1.graphics, '/S1_Neg_Worst_river_DN.png'),
     height = 10, 
     width = 10)
 riverplot(Neg_Worst_DN_riv, 
-          nodewidth = 3, 
+          nodewidth = 2, 
           plot_area = .95)
 title(ylab = 'Study 1 - Riverplot of DN Effect Decomposition Derived from Negative Mood Model: Negative Daily Events')
 dev.off()
 
 #Come back to this area to produce publication graphics (or arrange as graphics in ggplot)
 #png(paste0(study1.graphics, '/Combined_Neg_Worst_Rivers.png'), 
-#    units = 'in', 
-#    res = 900, 
-#    height = 20, 
-#    width = 10)
-#layout(matrix(c(1,2,2), nrow=3, ncol=1))
-#par(mar = c(0,0,0,0))
+png(paste0(getwd(), '/Combined_Neg_Worst_Rivers.png'),
+    units = 'in', 
+    res = 900, 
+    height = 10, 
+    width = 6)
+layout(matrix(c(1,2,2), nrow=3, ncol=1))
+par(mar = c(0,0,0,0))
 
-#riverplot(Neg_Worst_DN_riv, 
-#          nodewidth = 3, 
-#          plot_area = .95)
-#title(ylab = 'Study 1 - Riverplot of DN Effect Decomposition Derived from Negative Mood Model: Negative Daily Events')
+riverplot(Neg_Worst_DN_riv, 
+          nodewidth = 2, 
+          plot_area = .85)
+title(ylab = 'Study 1 - Riverplot of DN Effect Decomposition Derived from Negative Mood Model: Negative Daily Events')
 
-#riverplot(Neg_Worst_riv, 
-#          nodewidth = 3, 
-#          plot_area = 1)
-#title(ylab = 'Study 1 - Riverplot of Total Variance Decomposition Estimated from Negative Mood Models: Negative Daily Events')
-#dev.off()
+riverplot(Neg_Worst_riv, 
+          nodewidth = 2, 
+          plot_area = .85)
+title(ylab = 'Study 1 - Riverplot of Total Variance Decomposition Estimated from Negative Mood Models: Negative Daily Events')
+dev.off()
 
 #==========================================================================================================
 #NEGATIVE MOOD MODELS - Variance Decomposition
@@ -1458,6 +1569,118 @@ dev.off()
 beta_00<-fixef(Neg_ucm)[1,1]
 post_iter<-2000   #No. of chains per data set x No. post-warmup iterations per chain
 #for loops below require this value is correctly specified
+
+#NULL model - Using simple level 1 to ground between/within estimates
+#=-=-=-=-=-=-=-=-=-=-=-=-=-=
+within_cov<-c(24)                    #Columns with group-mean centered predictors
+random_cov<-c(24)                    #Level 1 predictors with random slopes
+
+#Getting distributions of fixed effects
+Intercept = posterior_samples(Neg_Best, pars = 'b_Intercept') 
+Best = posterior_samples(Neg_Best, pars = 'b_c.Best') 
+
+#Getting between-subjects variance terms for random effects
+Int_var = posterior_samples(Neg_Best, pars = 'sd_ID__Intercept')^2
+Best_var = posterior_samples(Neg_Best, pars = 'sd_ID__c.Best')^2 
+
+#Getting covariances of random effects (i.e., tau matrix)
+cov_Int_Best = posterior_samples(Neg_Best, pars = 'sd_ID__Intercept')*
+  posterior_samples(Neg_Best, pars = 'sd_ID__c.Best')*
+  posterior_samples(Neg_Best, pars = 'cor_ID__Intercept__c.Best')
+
+#Getting level 1 error variance
+sigma<-log(1+posterior_samples(Neg_Best, pars = 'sigma')/beta_00)
+
+post_samples<-data.frame(Intercept,
+                         Best, 
+                         Int_var, 
+                         Best_var, 
+                         cov_Int_Best, 
+                         sigma)
+
+colnames(post_samples)<-c('Intercept', 
+                          'Best', 
+                          'Int_var', 
+                          'Best_var', 
+                          'cov_Int_Best', 
+                          'sigma')
+
+#Aggregate across imputed datasets
+#Currently going to take 1000 draws from posterior distributions
+#Will then apply across all 20 data sets
+
+Neg_Best_var<-list(between_var=vector(), 
+                        within_var=vector(), 
+                        between_All_tot=vector(),
+                        between_All_btw=vector(),
+                        between_res_btw=vector(),
+                        within_fix_wthn=vector(),
+                        within_fix_tot=vector(),
+                        within_slope_var_wthn=vector(),
+                        within_res_wthn=vector(), 
+                        within_unmod_tot=vector())
+
+for(i in 1:length(dat.study1.list)){
+  print(paste('Starting w/ imputed set', i, 'out of', M))
+  samp_frame<-1:post_iter+(i-1)*post_iter
+  D<-sample(samp_frame, size = 400, replace = FALSE)
+  for(d in 1:length(D)){
+    #browser()
+    Gamma_w<-as.vector(
+      as.matrix(
+        post_samples[D[d], c('Best')]))       #Make sure the effects line up - in order of within_cov
+    Gamma_b<-as.vector(
+      as.matrix(
+        post_samples[D[d], c('Intercept')]))    #level fixed intercept and any level 2 fixed effects
+    tau<-c(post_samples[D[d], c('Int_var', 'cov_Int_Best')], 
+           post_samples[D[d], c('cov_Int_Best', 'Best_var')])
+    
+    tau<-matrix(unlist(tau), 
+                byrow=TRUE, 
+                ncol=2)
+    
+    #Matrix rows/columns ordered starting with tau.00 (intercept variance)
+    #then add columns/rows for random effects of slopes in order of within_cov
+    
+    Sigma2<-post_samples[D[d], 'sigma']
+    
+    r2mlm_DN<-r2MLM(data=dat.study1.list[[i]], 
+                    within_covs = within_cov, 
+                    between_covs = NULL, 
+                    random_covs = random_cov, 
+                    gamma_w = Gamma_w, 
+                    gamma_b = Gamma_b, 
+                    Tau = tau, 
+                    sigma2 = Sigma2, 
+                    has_intercept = TRUE, 
+                    clustermeancentered = TRUE)
+    
+    #Extracting relevant values across imputed datasets
+    Neg_Best_var$between_var<-c(Neg_Best_var$between_var, as.numeric(r2mlm_DN$Decompositions['fixed, between', 'total'])+
+                                       as.numeric(r2mlm_DN$Decompositions['mean variation', 'total']))
+    Neg_Best_var$within_var<-c(Neg_Best_var$within_var, as.numeric(r2mlm_DN$Decompositions['sigma2', 'total'])+
+                                      as.numeric(r2mlm_DN$Decompositions['slope variation', 'total'])+
+                                      as.numeric(r2mlm_DN$Decompositions['fixed, within', 'total']))
+    Neg_Best_var$between_All_tot<-c(Neg_Best_var$between_All_tot, as.numeric(r2mlm_DN$R2s['f2', 'total']))
+    Neg_Best_var$between_All_btw<-c(Neg_Best_var$between_All_btw, as.numeric(r2mlm_DN$R2s['f2', 'between']))
+    Neg_Best_var$between_res_btw<-c(Neg_Best_var$between_res_btw, as.numeric(r2mlm_DN$R2s['m', 'between']))
+    Neg_Best_var$within_fix_wthn<-c(Neg_Best_var$within_fix_wthn, as.numeric(r2mlm_DN$Decompositions['fixed, within', 'within']))
+    Neg_Best_var$within_fix_tot<-c(Neg_Best_var$within_fix_tot, as.numeric(r2mlm_DN$Decompositions['fixed, within', 'total']))
+    Neg_Best_var$within_slope_var_wthn<-c(Neg_Best_var$within_slope_var_wthn, as.numeric(r2mlm_DN$Decompositions['slope variation', 'within']))
+    Neg_Best_var$within_res_wthn<-c(Neg_Best_var$within_res_wthn, as.numeric(r2mlm_DN$Decompositions['sigma2', 'within']))
+    Neg_Best_var$within_unmod_tot<-c(Neg_Best_var$within_unmod_tot, as.numeric(r2mlm_DN$Decompositions['sigma2', 'total'])+
+                                            as.numeric(r2mlm_DN$Decompositions['slope variation', 'total']))
+    
+    print(paste("Sampling", d, "out of", length(D), '- Dataset:', i))
+  }
+  print(paste("*** Finshed imputed data set", i, 'out of', M, "***"))
+}
+
+gc()
+
+hist(Neg_Best_var$between_var)
+hist(Neg_Best_var$within_var)
+
 
 #MODEL 1 - LV2 Predictor = DN, LV1 = individually mean-centered negative event indicator
 #=-=-=-=-=-=-=-=-=-=-=-=-=-=
@@ -1568,9 +1791,10 @@ for(i in 1:length(dat.study1.list)){
   }
   print(paste("*** Finshed imputed data set", i, 'out of', M, "***"))
 }
-hist(Neg_Best_c.DN_var$between_var)
-mean(Neg_Best_c.DN_var$between_var)
 
+gc()
+
+hist(Neg_Best_c.DN_var$between_var)
 hist(Neg_Best_c.DN_var$within_var)
 
 #MODEL 2 - LV2 Predictor = Mean Negative Events, LV1 = individually mean-centered negative event indicator
@@ -1939,7 +2163,7 @@ mean(Neg_Best_cross_var$between_var)
 mean(Neg_Best_cross_var$between_var)-mean(Neg_Best_c.DN_var$between_var)
 
 #Between Variance Model Terms: 
-Neg_Best_btw<-mean(Neg_Best_cross_var$between_var)
+Neg_Best_btw<-mean(Neg_Best_var$between_var)
 Neg_Best_btw_All<-mean(Neg_Best_cross_var$between_All_tot)
 Neg_Best_btw_umod<-Neg_Best_btw-Neg_Best_btw_All
 
@@ -1949,7 +2173,7 @@ Neg_Best_btw_Exp_unique<-(mean(Neg_Best_All_var$between_All_btw)-mean(Neg_Best_c
 Neg_Best_btw_Shared<-Neg_Best_btw_All-(Neg_Best_btw_DN_unique+Neg_Best_btw_Exp_unique)
 
 #Within Variance Model Terms: 
-Neg_Best_wthn<-mean(Neg_Best_cross_var$within_var)
+Neg_Best_wthn<-mean(Neg_Best_var$within_var)
 Neg_Best_wthn_Best<-mean(Neg_Best_All_var$within_fix_tot)
 Neg_Best_wthn_Best_DN<-(mean(Neg_Best_All_var$within_res_wthn)-mean(Neg_Best_cross_var$within_res_wthn))*Neg_Best_wthn
 Neg_Best_wthn_unmod<-Neg_Best_wthn-Neg_Best_wthn_Best-Neg_Best_wthn_Best_DN
@@ -1962,23 +2186,23 @@ Total_DN<-Neg_Best_btw_DN_unique+Neg_Best_btw_Shared+Neg_Best_wthn_Best_DN
 #Main Variance Decompisition River Plot :: Negative Mood - Best Event Models :: 
 ###########################################################################################################
 Neg_Best_River_DF<-data.frame(N1 = c('DN',
-                                      'DN <--> PDE Exposure',
-                                      'PDE Exposure', 
-                                      'Unmodeled Between', 
-                                      'Momentary PDE', 
-                                      'DN x PDE Reactivity',
-                                      'Unmodeled Within', 
-                                      'Total Between', 
-                                      'Total Within'), 
-                               N2 = c('Total Between', 
-                                      'Total Between', 
-                                      'Total Between', 
-                                      'Total Between', 
-                                      'Total Within', 
-                                      'Total Within',
-                                      'Total Within', 
-                                      'Total Variance', 
-                                      'Total Variance'), 
+                                      'DN <--> PDE \n Exposure',
+                                      'PDE \n Exposure', 
+                                      'Unmodeled \n Between', 
+                                      'Momentary \n PDE', 
+                                      'DN x PDE \n Reactivity',
+                                      'Unmodeled \n Within', 
+                                      'Total \n Between', 
+                                      'Total \n Within'), 
+                               N2 = c('Total \n Between', 
+                                      'Total \n Between', 
+                                      'Total \n Between', 
+                                      'Total \n Between', 
+                                      'Total \n Within', 
+                                      'Total \n Within',
+                                      'Total \n Within', 
+                                      'Total \n Variance', 
+                                      'Total \n Variance'), 
                                Value = c(Neg_Best_btw_DN_unique, 
                                          Neg_Best_btw_Shared,
                                          Neg_Best_btw_Exp_unique, 
@@ -2007,8 +2231,8 @@ nodes<-data.frame(ID = c(Neg_Best_River_DF$N1,
                   x = c(1,1,1,1,1,1,1,2,2,3), 
                   y = c(0,2,4,6,8,10,12,3,9,6))
 
-palette = c(paste0(brewer.pal(9, "Blues"), 90)[c(2, 4, 6, 8)], 
-            paste0(brewer.pal(9, "Reds"), 90)[c(4,6,8)], 
+palette = c(paste0(brewer.pal(9, "Blues"), 90)[c(6,6,6,6)], 
+            paste0(brewer.pal(9, "Reds"), 90)[c(6,6,6)], 
             paste0(brewer.pal(9, "Blues"), 90)[9], 
             paste0(brewer.pal(9, "Reds"), 90)[9], 
             paste0(brewer.pal(9, 'Purples'), 90)[9])
@@ -2319,6 +2543,116 @@ Pos_Best_cross<-brms::brm_multiple(T.PosAff~1+c.Best+
 #==========================================================================================================
 post_iter<-2000   #No. of chains per data set x No. post-warmup iterations per chain
 #for loops below require this value is correctly specified
+
+#MODEL 1 - LV2 Predictor = DN, LV1 = individually mean-centered negative event indicator
+#=-=-=-=-=-=-=-=-=-=-=-=-=-=
+within_cov<-c(22)                    #Columns with group-mean centered predictors
+random_cov<-c(22)                    #Level 1 predictors with random slopes
+
+#Getting distributions of fixed effects
+Intercept = posterior_samples(Pos_Worst, pars = 'b_Intercept') 
+Worst = posterior_samples(Pos_Worst, pars = 'b_c.Worst') 
+
+#Getting between-subjects variance terms for random effects
+Int_var = posterior_samples(Pos_Worst, pars = 'sd_ID__Intercept')^2
+Worst_var = posterior_samples(Pos_Worst, pars = 'sd_ID__c.Worst')^2 
+
+#Getting covariances of random effects (i.e., tau matrix)
+cov_Int_Worst = posterior_samples(Pos_Worst, pars = 'sd_ID__Intercept')*
+  posterior_samples(Pos_Worst, pars = 'sd_ID__c.Worst')*
+  posterior_samples(Pos_Worst, pars = 'cor_ID__Intercept__c.Worst')
+
+#Getting level 1 error variance
+sigma<-posterior_samples(Pos_Worst, pars = 'sigma')
+
+post_samples<-data.frame(Intercept,
+                         Worst, 
+                         Int_var, 
+                         Worst_var, 
+                         cov_Int_Worst, 
+                         sigma)
+
+colnames(post_samples)<-c('Intercept', 
+                          'Worst', 
+                          'Int_var', 
+                          'Worst_var', 
+                          'cov_Int_Worst', 
+                          'sigma')
+
+#Aggregate across imputed datasets
+#Currently going to take 1000 draws from posterior distributions
+#Will then apply across all 20 data sets
+
+Pos_Worst_var<-list(between_var=vector(), 
+                         within_var=vector(), 
+                         between_All_tot=vector(),
+                         between_All_btw=vector(),
+                         between_res_btw=vector(),
+                         within_fix_wthn=vector(),
+                         within_fix_tot=vector(),
+                         within_slope_var_wthn=vector(),
+                         within_res_wthn=vector(), 
+                         within_unmod_tot=vector())
+
+for(i in 1:length(dat.study1.list)){
+  print(paste('Starting w/ imputed set', i, 'out of', M))
+  samp_frame<-1:post_iter+(i-1)*post_iter
+  D<-sample(samp_frame, size = 400, replace = FALSE)
+  for(d in 1:length(D)){
+    #browser()
+    Gamma_w<-as.vector(
+      as.matrix(
+        post_samples[D[d], c('Worst')]))       #Make sure the effects line up - in order of within_cov
+    Gamma_b<-as.vector(
+      as.matrix(
+        post_samples[D[d], c('Intercept')]))    #level fixed intercept and any level 2 fixed effects
+    tau<-c(post_samples[D[d], c('Int_var', 'cov_Int_Worst')], 
+           post_samples[D[d], c('cov_Int_Worst', 'Worst_var')])
+    
+    tau<-matrix(unlist(tau), 
+                byrow=TRUE, 
+                ncol=2)
+    
+    #Matrix rows/columns ordered starting with tau.00 (intercept variance)
+    #then add columns/rows for random effects of slopes in order of within_cov
+    
+    Sigma2<-post_samples[D[d], 'sigma']
+    
+    r2mlm_DN<-r2MLM(data=dat.study1.list[[i]], 
+                    within_covs = within_cov, 
+                    between_covs = NULL, 
+                    random_covs = random_cov, 
+                    gamma_w = Gamma_w, 
+                    gamma_b = Gamma_b, 
+                    Tau = tau, 
+                    sigma2 = Sigma2, 
+                    has_intercept = TRUE, 
+                    clustermeancentered = TRUE)
+    
+    #Extracting relevant values across imputed datasets
+    Pos_Worst_var$between_var<-c(Pos_Worst_var$between_var, as.numeric(r2mlm_DN$Decompositions['fixed, between', 'total'])+
+                                        as.numeric(r2mlm_DN$Decompositions['mean variation', 'total']))
+    Pos_Worst_var$within_var<-c(Pos_Worst_var$within_var, as.numeric(r2mlm_DN$Decompositions['sigma2', 'total'])+
+                                       as.numeric(r2mlm_DN$Decompositions['slope variation', 'total'])+
+                                       as.numeric(r2mlm_DN$Decompositions['fixed, within', 'total']))
+    Pos_Worst_var$between_All_tot<-c(Pos_Worst_var$between_All_tot, as.numeric(r2mlm_DN$R2s['f2', 'total']))
+    Pos_Worst_var$between_All_btw<-c(Pos_Worst_var$between_All_btw, as.numeric(r2mlm_DN$R2s['f2', 'between']))
+    Pos_Worst_var$between_res_btw<-c(Pos_Worst_var$between_res_btw, as.numeric(r2mlm_DN$R2s['m', 'between']))
+    Pos_Worst_var$within_fix_wthn<-c(Pos_Worst_var$within_fix_wthn, as.numeric(r2mlm_DN$Decompositions['fixed, within', 'within']))
+    Pos_Worst_var$within_fix_tot<-c(Pos_Worst_var$within_fix_tot, as.numeric(r2mlm_DN$Decompositions['fixed, within', 'total']))
+    Pos_Worst_var$within_slope_var_wthn<-c(Pos_Worst_var$within_slope_var_wthn, as.numeric(r2mlm_DN$Decompositions['slope variation', 'within']))
+    Pos_Worst_var$within_res_wthn<-c(Pos_Worst_var$within_res_wthn, as.numeric(r2mlm_DN$Decompositions['sigma2', 'within']))
+    Pos_Worst_var$within_unmod_tot<-c(Pos_Worst_var$within_unmod_tot, as.numeric(r2mlm_DN$Decompositions['sigma2', 'total'])+
+                                             as.numeric(r2mlm_DN$Decompositions['slope variation', 'total']))
+    
+    print(paste("Sampling", d, "out of", length(D), '- Dataset:', i))
+  }
+  print(paste("*** Finshed imputed data set", i, 'out of', M, "***"))
+}
+hist(Pos_Worst_var$between_var)
+hist(Pos_Worst_var$within_var)
+
+gc()
 
 #MODEL 1 - LV2 Predictor = DN, LV1 = individually mean-centered negative event indicator
 #=-=-=-=-=-=-=-=-=-=-=-=-=-=
